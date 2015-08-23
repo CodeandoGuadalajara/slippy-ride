@@ -15,6 +15,7 @@ import (
 	_ "github.com/lib/pq"
 	"database/sql"
 	"fmt"
+	"github.com/satori/go.uuid"
 )
 
 var dbConn *sql.DB
@@ -94,6 +95,9 @@ type connection struct {
 
 	// The hub.
 	h *hub
+	
+	// Connection ID
+	connectionID uuid.UUID
 }
 
 // Reader parses the message passed through the websocket and broadcasts it.
@@ -104,14 +108,14 @@ func (c *connection) reader() {
 			break
 		}
 		// Run message handler to read the event names and act accordingly
-		responseMessage := getEventResponse(message)
+		responseMessage := getEventResponse(message, c.connectionID)
 		
 		c.h.broadcast <- responseMessage
 	}
 	c.ws.Close()
 }
 
-func getEventResponse(jsonMessage []byte) []byte {
+func getEventResponse(jsonMessage []byte, connectionID uuid.UUID) []byte {
 	
 	var eventResponse []byte
 	var err error
@@ -131,7 +135,7 @@ func getEventResponse(jsonMessage []byte) []byte {
 			// Define query and execute as goroutine
 			data := jsonData["data"].(map[string]interface{})
 			
-			query := fmt.Sprint("INSERT INTO sleipnir.users_location (name, status, geography) VALUES ('", data["userName"], "', 1, ST_GeomFromText('POINT(", data["lng"], " ", data["lat"], ")',4326));")
+			query := fmt.Sprint("INSERT INTO sleipnir.users_location (name, status, id_connection, geography) VALUES ('", data["userName"], "', 1, '", connectionID, "', ST_GeomFromText('POINT(", data["lng"], " ", data["lat"], ")',4326));")
 			go executeQuery(dbConn,query)
 						
 			eventResponse = jsonMessage
@@ -145,7 +149,7 @@ func getEventResponse(jsonMessage []byte) []byte {
 			// Define query and execute as goroutine
 			data := jsonData["data"].(map[string]interface{})
 			
-			query := fmt.Sprint("UPDATE sleipnir.users_location SET name = '", data["userName"], "', status=1, geography = ST_GeomFromText('POINT(", data["lng"], " ", data["lat"], ")',4326) WHERE name = '", data["userName"], "';")
+			query := fmt.Sprint("UPDATE sleipnir.users_location SET name = '", data["userName"], "', status=1, geography = ST_GeomFromText('POINT(", data["lng"], " ", data["lat"], ")',4326) WHERE id_connection = '", connectionID, "';")
 			go executeQuery(dbConn,query)
 						
 			eventResponse = jsonMessage
@@ -159,9 +163,7 @@ func getEventResponse(jsonMessage []byte) []byte {
 			// Send cleanup marker event
 			jsonData["event"] = "remove-user-marker"
 			
-			data := jsonData["data"].(map[string]interface{})
-			
-			query := fmt.Sprint("DELETE FROM sleipnir.users_location WHERE name = '", data["userName"], "';")
+			query := fmt.Sprint("DELETE FROM sleipnir.users_location WHERE id_connection = '", connectionID, "';")
 			go executeQuery(dbConn,query)
 			
 			// Marshall JSON
@@ -226,7 +228,7 @@ func (wsh wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	c := &connection{send: make(chan []byte, 256), ws: ws, h: wsh.h}
+	c := &connection{send: make(chan []byte, 256), ws: ws, h: wsh.h, connectionID: uuid.NewV4()}
 	c.h.register <- c
 	defer func() { c.h.unregister <- c }()
 	go c.writer()
