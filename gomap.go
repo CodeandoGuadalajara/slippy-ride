@@ -139,6 +139,20 @@ func getEventResponse(jsonMessage []byte) []byte {
 
 		break;
 		
+		// User changed position, update in db
+		case "updated-user-location":
+			
+			// Define query and execute as goroutine
+			data := jsonData["data"].(map[string]interface{})
+			
+			query := fmt.Sprint("UPDATE sleipnir.users_location SET name = '", data["userName"], "', status=1, geography = ST_GeomFromText('POINT(", data["lng"], " ", data["lat"], ")',4326) WHERE name = '", data["userName"], "';")
+			go executeQuery(dbConn,query)
+						
+			eventResponse = jsonMessage
+			err = nil
+
+		break;
+		
 		// User left, cleanup
 		case "user-left":
 			
@@ -158,10 +172,10 @@ func getEventResponse(jsonMessage []byte) []byte {
 		// New bus location, check if users are close by to report location
 		case "new-bus-location":
 			
-			data := jsonData["data"].(map[string]interface{})
+			//data := jsonData["data"].(map[string]interface{})
 			
 			//query := fmt.Sprint("DELETE FROM sleipnir.users_location WHERE name = '", data["userName"], "';")
-			go executeQuery(dbConn,query)
+			//go executeQuery(dbConn,query)
 
 		break;
 		
