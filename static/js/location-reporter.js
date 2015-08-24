@@ -2,6 +2,8 @@ var socket;
 var myUserName;
 var markers = {};
 var busMarkers = {};
+var radiusMarker;
+var searchRadius = 1000;
 var isSimulator = false;
 var map;
 
@@ -136,6 +138,18 @@ function positionSuccess(position) {
 	
 	var newPosition = {"event": "new-user-location", "data": {"userName": myUserName, "lat": lat, "lng": lng}};
 	socket.send(JSON.stringify(newPosition));
+	
+	// Create radius indicator
+	radiusMarker = new google.maps.Circle({
+		strokeColor: '#FF0000',
+		strokeOpacity: 0.8,
+		strokeWeight: 2,
+		fillColor: '#FF0000',
+		fillOpacity: 0.11,
+		map: map,
+		center: new google.maps.LatLng(lat,lng),
+		radius: searchRadius
+	});
 	//console.log("Report emmited");
 }
 
@@ -181,8 +195,11 @@ function createMarker(userName, lat, lng, showInfowindow){
 	}
 	
 	google.maps.event.addListener(marker, 'drag', function() {
+		// Broadcast new position and update radius marker
 		var newPosition = {"event": "updated-user-location", "data": {"userName": myUserName, "lat": this.getPosition().lat(), "lng": this.getPosition().lng()}};
 		socket.send(JSON.stringify(newPosition));
+		
+		radiusMarker.setCenter(this.getPosition());
 	});
 }
 

@@ -58,6 +58,7 @@ func newHub() *hub {
 
 // Run the connections hub.
 func (h *hub) run() {
+	
 	// Check each of the channels and act accordingly.
 	for {
 		select {
@@ -71,12 +72,58 @@ func (h *hub) run() {
 		// If we have a message iterate through the connections and send the message.
 		// It is at this point where we should check to which connections we will be sending data.
 		case m := <-h.broadcast:
-			for c := range h.connections {
-				select {
-					case c.send <- m:
-				default:
-					delete(h.connections, c)
-					close(c.send)
+			
+			// Check that message is not null
+			if m != nil{
+				
+				// Read JSON data and check if we require a selective broadcast
+				var jsonData map[string]interface{}
+				if err := json.Unmarshal(m, &jsonData); err != nil {		       
+					panic(err)
+			    }
+				
+				// new-bus-location requires selective broadcast
+				if jsonData["event"] == "updated-bus-location"{
+					
+					// Get message data
+					data := jsonData["data"].(map[string]interface{})
+					
+					// Query users to broadcast to based on location
+					query := fmt.Sprint("SELECT id_connection FROM sleipnir.users_location WHERE ST_DWITHIN(geography, ST_GeomFromText('POINT(", data["lng"], " ", data["lat"], ")',4326), 1000);")
+					rows, err := dbConn.Query(query)
+					
+					if err != nil {
+					    fmt.Println(err)
+						log.Fatal(err)
+					}
+					
+					// Broadcast to each of the resulting users
+					for rows.Next() {
+					    var id_connection string
+					    if err := rows.Scan(&id_connection); err != nil {
+					        fmt.Println(err)
+							log.Fatal(err)
+					    }
+						
+					    fmt.Println("%s", id_connection)
+						h.connections
+					}
+					
+					// Log errors
+					if err := rows.Err(); err != nil {
+					    log.Fatal(err)
+					}
+					
+				} else {
+			
+					for c := range h.connections {
+						select {
+							case c.send <- m:
+						default:
+							delete(h.connections, c)
+							close(c.send)
+						}
+					}
 				}
 			}
 		}
