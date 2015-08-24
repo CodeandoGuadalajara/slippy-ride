@@ -34,7 +34,7 @@ func dbConnect() *sql.DB {
 // registering and unregistering connections.
 type hub struct {
 	// Registered connections.
-	connections map[*connection]bool
+	connections map[string]*connection
 
 	// Inbound messages from the connections.
 	broadcast chan []byte
@@ -52,7 +52,7 @@ func newHub() *hub {
 		broadcast:   make(chan []byte),
 		register:    make(chan *connection),
 		unregister:  make(chan *connection),
-		connections: make(map[*connection]bool),
+		connections: make(map[string]*connection),
 	}
 }
 
@@ -63,10 +63,10 @@ func (h *hub) run() {
 	for {
 		select {
 		case c := <-h.register:
-			h.connections[c] = true
+			h.connections[c.connectionID] = c
 		case c := <-h.unregister:
-			if _, ok := h.connections[c]; ok {
-				delete(h.connections, c)
+			if _, ok := h.connections[c.connectionID]; ok {
+				delete(h.connections, c.connectionID)
 				close(c.send)
 			}
 		// If we have a message iterate through the connections and send the message.
@@ -105,8 +105,12 @@ func (h *hub) run() {
 							log.Fatal(err)
 					    }
 						
-					    fmt.Println("%s", id_connection)
-						h.connections
+						if c, ok := h.connections[id_connection]; ok {
+							c.send <- m
+						} else {
+							delete(h.connections, id_connection)
+							close(c.send)
+						}
 					}
 					
 					// Log errors
@@ -116,11 +120,11 @@ func (h *hub) run() {
 					
 				} else {
 			
-					for c := range h.connections {
+					for id,c := range h.connections {
 						select {
 							case c.send <- m:
 						default:
-							delete(h.connections, c)
+							delete(h.connections, id)
 							close(c.send)
 						}
 					}
@@ -144,7 +148,7 @@ type connection struct {
 	h *hub
 	
 	// Connection ID
-	connectionID uuid.UUID
+	connectionID string
 }
 
 // Reader parses the message passed through the websocket and broadcasts it.
@@ -162,7 +166,7 @@ func (c *connection) reader() {
 	c.ws.Close()
 }
 
-func getEventResponse(jsonMessage []byte, connectionID uuid.UUID) []byte {
+func getEventResponse(jsonMessage []byte, connectionID string) []byte {
 	
 	var eventResponse []byte
 	var err error
@@ -275,7 +279,7 @@ func (wsh wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	c := &connection{send: make(chan []byte, 256), ws: ws, h: wsh.h, connectionID: uuid.NewV4()}
+	c := &connection{send: make(chan []byte, 256), ws: ws, h: wsh.h, connectionID: uuid.NewV4().String()}
 	c.h.register <- c
 	defer func() { c.h.unregister <- c }()
 	go c.writer()

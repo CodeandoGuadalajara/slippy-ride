@@ -201,6 +201,22 @@ function createMarker(userName, lat, lng, showInfowindow){
 		
 		radiusMarker.setCenter(this.getPosition());
 	});
+	
+	google.maps.event.addListener(marker, 'dragend', function() {
+		var distanceToUser;
+		var updatedArray = {};
+		
+		for (var key in busMarkers) {
+			distanceToUser = google.maps.geometry.spherical.computeDistanceBetween(busMarkers[key].getPosition(), this.getPosition());
+			if (distanceToUser < searchRadius){
+				updatedArray[key] = busMarkers[key];
+			} else {
+				removeBusMarker(key);
+			}
+		}
+		
+		busMarkers = updatedArray;
+	});
 }
 
 // handle geolocation api errors
