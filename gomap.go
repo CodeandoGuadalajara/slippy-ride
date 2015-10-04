@@ -15,10 +15,9 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
-	"regexp"
 )
 
-// Initial variables
+// Initial variables.
 var (
 	// Web server
 	addr        = flag.String("addr", ":8080", "http service address")
@@ -43,15 +42,8 @@ var (
 	usersTableGeographyColumn string = "geography"
 )
 
-// dbConnect creates the connection to the database using the parameters specified in the Initial variables
-func dbConnect() *sql.DB {
-	// Create connection
-	db, err := sql.Open("postgres", fmt.Sprintf("host=%s dbname=%s user=%s password=%s sslmode=%s", dbHost, dbName, dbUser, dbPassword, dbSslMode))
-	if err != nil {
-		panic(err)
-	}
-	return db
-}
+// Parse template files one time, then render them when needed with templates.ExecuteTemplate
+var templates = template.Must(template.ParseFiles("map.html", "routes.html"))
 
 // A hub represents the structure of a websockets connection hub.
 // It contains a connections map and channels for broadcasting messages,
@@ -70,7 +62,49 @@ type hub struct {
 	unregister chan *connection
 }
 
-// Create a new connections hub.
+// Type connection represents a websockets connection.
+// It is conformed of a reference to the websockets connection,
+// a buffered channel for data transfer and a reference to the hub.
+type connection struct {
+	// The websocket connection.
+	ws *websocket.Conn
+
+	// Buffered channel of outbound messages.
+	send chan []byte
+
+	// The hub.
+	h *hub
+
+	// Connection ID
+	connectionID string
+}
+
+// wsHandler represents a WebSocket handler.
+type wsHandler struct {
+	h *hub
+}
+
+// dbConnect creates the connection to the database using the parameters specified in the Initial variables.
+func dbConnect() *sql.DB {
+	// Create connection
+	db, err := sql.Open("postgres", fmt.Sprintf("host=%s dbname=%s user=%s password=%s sslmode=%s", dbHost, dbName, dbUser, dbPassword, dbSslMode))
+	if err != nil {
+		panic(err)
+	}
+	return db
+}
+
+// executeQuery runs the database query string passed to it.
+func executeQuery(dbConn *sql.DB, query string) {
+
+	_, err := dbConn.Exec(query)
+
+	if err != nil {
+		fmt.Println(err)
+	}
+}
+
+// newHub creates a new connections hub.
 func newHub() *hub {
 	return &hub{
 		broadcast:   make(chan []byte),
@@ -80,8 +114,8 @@ func newHub() *hub {
 	}
 }
 
-// Run the connections hub.
-func (h *hub) run() {
+// runHub runs the connections hub.
+func (h *hub) runHub() {
 
 	// Check each of the channels and act accordingly.
 	for {
@@ -157,24 +191,7 @@ func (h *hub) run() {
 	}
 }
 
-// Type connection represents a websockets connection.
-// It is conformed of a reference to the websockets connection,
-// a buffered channel for data transfer and a reference to the hub.
-type connection struct {
-	// The websocket connection.
-	ws *websocket.Conn
-
-	// Buffered channel of outbound messages.
-	send chan []byte
-
-	// The hub.
-	h *hub
-
-	// Connection ID
-	connectionID string
-}
-
-// Reader parses the message passed through the websocket and broadcasts it.
+// reader parses the message passed through the websocket and broadcasts it.
 func (c *connection) reader() {
 	for {
 		_, message, err := c.ws.ReadMessage()
@@ -189,6 +206,19 @@ func (c *connection) reader() {
 	c.ws.Close()
 }
 
+// writer sends data through the websocket.
+func (c *connection) writer() {
+	for message := range c.send {
+		err := c.ws.WriteMessage(websocket.TextMessage, message)
+		if err != nil {
+			break
+		}
+	}
+	c.ws.Close()
+}
+
+// getEventResponse reads the event name passed from the reader and generates
+// an appropriate response based on it.
 func getEventResponse(jsonMessage []byte, connectionID string) []byte {
 
 	var eventResponse []byte
@@ -267,33 +297,8 @@ func getEventResponse(jsonMessage []byte, connectionID string) []byte {
 	return eventResponse
 }
 
-func executeQuery(dbConn *sql.DB, query string) {
-
-	_, err := dbConn.Exec(query)
-
-	if err != nil {
-		fmt.Println(err)
-	}
-}
-
-// Writer sends data through the websocket.
-func (c *connection) writer() {
-	for message := range c.send {
-		err := c.ws.WriteMessage(websocket.TextMessage, message)
-		if err != nil {
-			break
-		}
-	}
-	c.ws.Close()
-}
-
-// Upgrader creates a websocket connection by upgrading an ordinary http connection.
+// upgrader creates a websocket connection by upgrading an ordinary http connection.
 var upgrader = &websocket.Upgrader{ReadBufferSize: 1024, WriteBufferSize: 1024}
-
-// wsHandler represents a WebSocket handler.
-type wsHandler struct {
-	h *hub
-}
 
 // ServeHTTP starts http serving.
 func (wsh wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -313,23 +318,17 @@ func homeHandler(c http.ResponseWriter, req *http.Request) {
 	homeTempl.Execute(c, req.Host)
 }
 
-// routeSimulatorHandler serves the home template when accessing the root endpoint
+// routeSimulatorHandler serves the route simulator template when accessing the /routes endpoint
 func routeSimulatorHandler(c http.ResponseWriter, req *http.Request) {
 	routesTempl.Execute(c, req.Host)
 }
-
-// Parse template files one time, then render them when needed with templates.ExecuteTemplate
-var templates = template.Must(template.ParseFiles("map.html", "routes.html"))
-
-// Restrict valid paths to edit, save or view endpoints
-var validPath = regexp.MustCompile("^/(gomap)/([a-zA-Z0-9]+)$")
 
 // View endpoint handler, loads the page body and renders the appropriate template
 func viewHandler(w http.ResponseWriter, r *http.Request, title string) {
 	renderTemplate(w, "map")
 }
 
-// Template rendering function
+// renderTemplate handles the rendering of page templates
 func renderTemplate(w http.ResponseWriter, tmpl string) {
 	err := templates.ExecuteTemplate(w, tmpl+".html", nil)
 	if err != nil {
@@ -353,7 +352,7 @@ func main() {
 	h := newHub()
 
 	// Run hub concurrently
-	go h.run()
+	go h.runHub()
 
 	// Define handlers
 	http.HandleFunc("/", homeHandler)
