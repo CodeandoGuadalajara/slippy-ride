@@ -4,32 +4,56 @@
 package main
 
 import (
+	"database/sql"
+	"encoding/json"
 	"flag"
+	"fmt"
 	"github.com/gorilla/websocket"
+	_ "github.com/lib/pq"
+	"github.com/satori/go.uuid"
 	"html/template"
 	"log"
 	"net/http"
 	"path/filepath"
 	"regexp"
-	"encoding/json"
-	_ "github.com/lib/pq"
-	"database/sql"
-	"fmt"
-	"github.com/satori/go.uuid"
 )
 
-var dbConn *sql.DB
+// Initial variables
+var (
+	// Web server
+	addr        = flag.String("addr", ":8080", "http service address")
+	homeTempl   *template.Template
+	routesTempl *template.Template
 
+	// DB connection parameters
+	dbConn     *sql.DB
+	dbHost     string = "localhost"
+	dbName     string = "Gaia"
+	dbUser     string = "webapp"
+	dbPassword string = "PG4pp!"
+	dbSslMode  string = "disable"
+
+	// Users table column names
+	// No variable is defined for SRID since we are using a geography column type and
+	// geography types always use lat/lon 4326
+	usersTable                string = "sleipnir.users_location"
+	usersTableConnectionId    string = "id_connection"
+	usersTableName            string = "name"
+	usersTableStatus          string = "status"
+	usersTableGeographyColumn string = "geography"
+)
+
+// dbConnect creates the connection to the database using the parameters specified in the Initial variables
 func dbConnect() *sql.DB {
 	// Create connection
-	db, err := sql.Open("postgres", "user=webapp host=localhost dbname=Gaia password=PG4pp! sslmode=disable")
+	db, err := sql.Open("postgres", fmt.Sprintf("host=%s dbname=%s user=%s password=%s sslmode=%s", dbHost, dbName, dbUser, dbPassword, dbSslMode))
 	if err != nil {
 		panic(err)
 	}
 	return db
 }
 
-// Type hub represents the structure of a websockets connection hub.
+// A hub represents the structure of a websockets connection hub.
 // It contains a connections map and channels for broadcasting messages,
 // registering and unregistering connections.
 type hub struct {
@@ -58,7 +82,7 @@ func newHub() *hub {
 
 // Run the connections hub.
 func (h *hub) run() {
-	
+
 	// Check each of the channels and act accordingly.
 	for {
 		select {
@@ -72,39 +96,38 @@ func (h *hub) run() {
 		// If we have a message iterate through the connections and send the message.
 		// It is at this point where we should check to which connections we will be sending data.
 		case m := <-h.broadcast:
-			
+
 			// Check that message is not null
-			if m != nil{
-				
+			if m != nil {
+
 				// Read JSON data and check if we require a selective broadcast
 				var jsonData map[string]interface{}
-				if err := json.Unmarshal(m, &jsonData); err != nil {		       
+				if err := json.Unmarshal(m, &jsonData); err != nil {
 					panic(err)
-			    }
-				
+				}
+
 				// new-bus-location requires selective broadcast
-				if jsonData["event"] == "updated-bus-location"{
-					
+				if jsonData["event"] == "updated-bus-location" {
+
 					// Get message data
 					data := jsonData["data"].(map[string]interface{})
-					
+
 					// Query users to broadcast to based on location
-					query := fmt.Sprint("SELECT id_connection FROM sleipnir.users_location WHERE ST_DWITHIN(geography, ST_GeomFromText('POINT(", data["lng"], " ", data["lat"], ")',4326), 1000);")
+					query := fmt.Sprint("SELECT ", usersTableConnectionId, " FROM ", usersTable, " WHERE ST_DWITHIN(", usersTableGeographyColumn, ", ST_GeomFromText('POINT(", data["lng"], " ", data["lat"], ")',4326), 1000);")
 					rows, err := dbConn.Query(query)
-					
+
 					if err != nil {
-					    fmt.Println(err)
+						fmt.Println(err)
 						log.Fatal(err)
 					}
-					
+
 					// Broadcast to each of the resulting users
 					for rows.Next() {
-					    var id_connection string
-					    if err := rows.Scan(&id_connection); err != nil {
-					        fmt.Println(err)
+						var id_connection string
+						if err := rows.Scan(&id_connection); err != nil {
+							fmt.Println(err)
 							log.Fatal(err)
-					    }
-						
+						}
 						if c, ok := h.connections[id_connection]; ok {
 							c.send <- m
 						} else {
@@ -112,17 +135,17 @@ func (h *hub) run() {
 							close(c.send)
 						}
 					}
-					
+
 					// Log errors
 					if err := rows.Err(); err != nil {
-					    log.Fatal(err)
+						log.Fatal(err)
 					}
-					
+
 				} else {
-			
-					for id,c := range h.connections {
+
+					for id, c := range h.connections {
 						select {
-							case c.send <- m:
+						case c.send <- m:
 						default:
 							delete(h.connections, id)
 							close(c.send)
@@ -146,7 +169,7 @@ type connection struct {
 
 	// The hub.
 	h *hub
-	
+
 	// Connection ID
 	connectionID string
 }
@@ -160,96 +183,95 @@ func (c *connection) reader() {
 		}
 		// Run message handler to read the event names and act accordingly
 		responseMessage := getEventResponse(message, c.connectionID)
-		
+
 		c.h.broadcast <- responseMessage
 	}
 	c.ws.Close()
 }
 
 func getEventResponse(jsonMessage []byte, connectionID string) []byte {
-	
+
 	var eventResponse []byte
 	var err error
-	
+
 	// Read JSON data
 	var jsonData map[string]interface{}
 	if err := json.Unmarshal(jsonMessage, &jsonData); err != nil {
-        panic(err)
-    }
-	
-	// Check the event name and act accordingly
-	switch jsonData["event"]{
-		
-		// User arrived, register in db
-		case "new-user-location":
-			
-			// Define query and execute as goroutine
-			data := jsonData["data"].(map[string]interface{})
-			
-			query := fmt.Sprint("INSERT INTO sleipnir.users_location (name, status, id_connection, geography) VALUES ('", data["userName"], "', 1, '", connectionID, "', ST_GeomFromText('POINT(", data["lng"], " ", data["lat"], ")',4326));")
-			go executeQuery(dbConn,query)
-						
-			eventResponse = jsonMessage
-			err = nil
-
-		break;
-		
-		// User changed position, update in db
-		case "updated-user-location":
-			
-			// Define query and execute as goroutine
-			data := jsonData["data"].(map[string]interface{})
-			
-			query := fmt.Sprint("UPDATE sleipnir.users_location SET name = '", data["userName"], "', status=1, geography = ST_GeomFromText('POINT(", data["lng"], " ", data["lat"], ")',4326) WHERE id_connection = '", connectionID, "';")
-			go executeQuery(dbConn,query)
-						
-			eventResponse = jsonMessage
-			err = nil
-
-		break;
-		
-		// User left, cleanup
-		case "user-left":
-			
-			// Send cleanup marker event
-			jsonData["event"] = "remove-user-marker"
-			
-			query := fmt.Sprint("DELETE FROM sleipnir.users_location WHERE id_connection = '", connectionID, "';")
-			go executeQuery(dbConn,query)
-			
-			// Marshall JSON
-			eventResponse, err = json.Marshal(jsonData)
-
-		break;
-		
-		// New bus location, check if users are close by to report location
-		case "new-bus-location":
-			
-			//data := jsonData["data"].(map[string]interface{})
-			
-			//query := fmt.Sprint("DELETE FROM sleipnir.users_location WHERE name = '", data["userName"], "';")
-			//go executeQuery(dbConn,query)
-
-		break;
-		
-		default:
-			eventResponse = jsonMessage
-			err = nil
+		panic(err)
 	}
-	
+
+	// Check the event name and act accordingly
+	switch jsonData["event"] {
+
+	// User arrived, register in db
+	case "new-user-location":
+
+		// Define query and execute as goroutine
+		data := jsonData["data"].(map[string]interface{})
+
+		query := fmt.Sprint("INSERT INTO ", usersTable, " (", usersTableName, ",", usersTableStatus, ",", usersTableConnectionId, ",", usersTableGeographyColumn, ") VALUES ('", data["userName"], "', 1, '", connectionID, "', ST_GeomFromText('POINT(", data["lng"], " ", data["lat"], ")',4326));")
+		go executeQuery(dbConn, query)
+
+		eventResponse = jsonMessage
+		err = nil
+
+		break
+
+	// User changed position, update in db
+	case "updated-user-location":
+
+		// Define query and execute as goroutine
+		data := jsonData["data"].(map[string]interface{})
+
+		query := fmt.Sprint("UPDATE ", usersTable, " SET ", usersTableName, " = '", data["userName"], "', ", usersTableStatus, "=1, ", usersTableGeographyColumn, " = ST_GeomFromText('POINT(", data["lng"], " ", data["lat"], ")',4326) WHERE ", usersTableConnectionId, " = '", connectionID, "';")
+		go executeQuery(dbConn, query)
+		eventResponse = jsonMessage
+		err = nil
+
+		break
+
+	// User left, cleanup
+	case "user-left":
+
+		// Send cleanup marker event
+		jsonData["event"] = "remove-user-marker"
+
+		query := fmt.Sprint("DELETE FROM ", usersTable, " WHERE ", usersTableConnectionId, "= '", connectionID, "';")
+		go executeQuery(dbConn, query)
+
+		// Marshall JSON
+		eventResponse, err = json.Marshal(jsonData)
+
+		break
+
+	// New bus location, check if users are close by to report location
+	case "new-bus-location":
+
+		//data := jsonData["data"].(map[string]interface{})
+
+		//query := fmt.Sprint("DELETE FROM ", usersTable, " WHERE ", usersTableName, "= '", data["userName"], "';")
+		//go executeQuery(dbConn,query)
+
+		break
+
+	default:
+		eventResponse = jsonMessage
+		err = nil
+	}
+
 	if err != nil {
 		// TODO: Return error response
 		panic(err)
 	}
-	
+
 	return eventResponse
 }
 
-func executeQuery(dbConn *sql.DB, query string){
-	
+func executeQuery(dbConn *sql.DB, query string) {
+
 	_, err := dbConn.Exec(query)
-	
-	if err != nil{
+
+	if err != nil {
 		fmt.Println(err)
 	}
 }
@@ -286,14 +308,6 @@ func (wsh wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	c.reader()
 }
 
-// Initial variables
-var (
-	addr      = flag.String("addr", ":8080", "http service address")
-	//assets    = flag.String("assets", defaultAssetPath(), "path to assets")
-	homeTempl *template.Template
-	routesTempl *template.Template
-)
-
 // homeHandler serves the home template when accessing the root endpoint
 func homeHandler(c http.ResponseWriter, req *http.Request) {
 	homeTempl.Execute(c, req.Host)
@@ -310,7 +324,6 @@ var templates = template.Must(template.ParseFiles("map.html", "routes.html"))
 // Restrict valid paths to edit, save or view endpoints
 var validPath = regexp.MustCompile("^/(gomap)/([a-zA-Z0-9]+)$")
 
-
 // View endpoint handler, loads the page body and renders the appropriate template
 func viewHandler(w http.ResponseWriter, r *http.Request, title string) {
 	renderTemplate(w, "map")
@@ -326,29 +339,29 @@ func renderTemplate(w http.ResponseWriter, tmpl string) {
 
 // Main entry point
 func main() {
-	
+
 	// Connect to DB
 	dbConn = dbConnect()
 	defer dbConn.Close()
-	
+
 	// Parse initial flags
 	flag.Parse()
-	
+
 	// Define home template and hub
 	homeTempl = template.Must(template.ParseFiles(filepath.Join("/home/otto/Devel/go/src/github.com/marakame/gomap", "map.html")))
 	routesTempl = template.Must(template.ParseFiles(filepath.Join("/home/otto/Devel/go/src/github.com/marakame/gomap", "routes.html")))
 	h := newHub()
-	
+
 	// Run hub concurrently
 	go h.run()
-	
+
 	// Define handlers
 	http.HandleFunc("/", homeHandler)
 	http.Handle("/ws", wsHandler{h: h})
 	http.Handle("/routes/ws", wsHandler{h: h})
 	http.HandleFunc("/routes/", routeSimulatorHandler)
 	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("/home/otto/Devel/go/src/github.com/marakame/gomap/static/"))))
-	
+
 	// Start server
 	if err := http.ListenAndServe(*addr, nil); err != nil {
 		log.Fatal("ListenAndServe:", err)
