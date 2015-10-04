@@ -23,6 +23,11 @@ var (
 	addr        = flag.String("addr", ":8080", "http service address")
 	homeTempl   *template.Template
 	routesTempl *template.Template
+	
+	// Paths
+	basePath 		string = "."
+	templatesPath	string = filepath.Join(basePath, "templates")
+	httpStaticPath	string = filepath.Join(basePath, "static")
 
 	// DB connection parameters
 	dbConn     *sql.DB
@@ -41,9 +46,6 @@ var (
 	usersTableStatus          string = "status"
 	usersTableGeographyColumn string = "geography"
 )
-
-// Parse template files one time, then render them when needed with templates.ExecuteTemplate
-var templates = template.Must(template.ParseFiles("map.html", "routes.html"))
 
 // A hub represents the structure of a websockets connection hub.
 // It contains a connections map and channels for broadcasting messages,
@@ -323,19 +325,6 @@ func routeSimulatorHandler(c http.ResponseWriter, req *http.Request) {
 	routesTempl.Execute(c, req.Host)
 }
 
-// View endpoint handler, loads the page body and renders the appropriate template
-func viewHandler(w http.ResponseWriter, r *http.Request, title string) {
-	renderTemplate(w, "map")
-}
-
-// renderTemplate handles the rendering of page templates
-func renderTemplate(w http.ResponseWriter, tmpl string) {
-	err := templates.ExecuteTemplate(w, tmpl+".html", nil)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-	}
-}
-
 // Main entry point
 func main() {
 
@@ -347,8 +336,8 @@ func main() {
 	flag.Parse()
 
 	// Define home template and hub
-	homeTempl = template.Must(template.ParseFiles(filepath.Join("/home/otto/Devel/go/src/github.com/marakame/gomap", "map.html")))
-	routesTempl = template.Must(template.ParseFiles(filepath.Join("/home/otto/Devel/go/src/github.com/marakame/gomap", "routes.html")))
+	homeTempl = template.Must(template.ParseFiles(filepath.Join(templatesPath, "map.html")))
+	routesTempl = template.Must(template.ParseFiles(filepath.Join(templatesPath, "routes.html")))
 	h := newHub()
 
 	// Run hub concurrently
@@ -359,7 +348,7 @@ func main() {
 	http.Handle("/ws", wsHandler{h: h})
 	http.Handle("/routes/ws", wsHandler{h: h})
 	http.HandleFunc("/routes/", routeSimulatorHandler)
-	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("/home/otto/Devel/go/src/github.com/marakame/gomap/static/"))))
+	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir(httpStaticPath))))
 
 	// Start server
 	if err := http.ListenAndServe(*addr, nil); err != nil {
