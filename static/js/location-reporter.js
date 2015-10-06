@@ -53,6 +53,7 @@ function initializeSocket(){
 				break;
 				
 				case 'new-bus-location':
+					console.log("new-bus");
 					if(evtData.data.lat && evtData.data.lng){
 						//console.log(evtData.data);
 						createBusMarker(evtData.data.id, evtData.data.routeNumber, evtData.data.lat, evtData.data.lng, false);
@@ -65,13 +66,40 @@ function initializeSocket(){
 					if (busMarkers[evtData.data.id] == null){
 						if(evtData.data.lat && evtData.data.lng){
 							//console.log(evtData.data);
-							createBusMarker(evtData.data.id, evtData.data.routeNumber, evtData.data.lat, evtData.data.lng, false);
+							
+							// Check if it's within the bounds of search radius
+							var busLocation = new google.maps.LatLng(evtData.data.lat,evtData.data.lng);
+							if (markers[myUserName] != null){
+								// A radius of 0 means no limit
+								if (searchRadius != 0){
+									if (isWithinBounds(busLocation, markers[myUserName].getPosition(), searchRadius)){
+										createBusMarker(evtData.data.id, evtData.data.routeNumber, evtData.data.lat, evtData.data.lng, false);
+									}
+								} else {
+									createBusMarker(evtData.data.id, evtData.data.routeNumber, evtData.data.lat, evtData.data.lng, false);
+								}
+							}
 						} else {
 							console.log("Could not get location", evtData.data);
 						}
 					} else {
 						if(evtData.data.lat && evtData.data.lng){
-							busMarkers[evtData.data.id].setPosition(new google.maps.LatLng(evtData.data.lat, evtData.data.lng));
+							
+							// Check if it's within the bounds of search radius
+							var busLocation = new google.maps.LatLng(evtData.data.lat,evtData.data.lng);
+							if (markers[myUserName] != null){
+								// A radius of 0 means no limit
+								if (searchRadius != 0){
+									if (!isWithinBounds(busLocation, markers[myUserName].getPosition(), searchRadius)){
+										removeBusMarker(evtData.data.id);
+									} else {
+										busMarkers[evtData.data.id].setPosition(new google.maps.LatLng(evtData.data.lat, evtData.data.lng));
+									}
+								} else {
+									busMarkers[evtData.data.id].setPosition(new google.maps.LatLng(evtData.data.lat, evtData.data.lng));
+								}
+							}
+						
 						} else {
 							console.log("Could not update location", evtData.data);
 						}
@@ -106,8 +134,6 @@ function sendPosition(position){
            return false;
     }
 	var newPosition = {"event": "new-bus-location", "data": {"lat": position.lat(), "lng": position.lng()}};
-	
-	console.log(newPosition);
 	socket.send(JSON.stringify(newPosition));
 }
 
@@ -136,7 +162,7 @@ function positionSuccess(position) {
 	var lng = position.coords.longitude;
 	var acr = position.coords.accuracy;
 	
-	var newPosition = {"event": "new-user-location", "data": {"userName": myUserName, "lat": lat, "lng": lng}};
+	var newPosition = {"event": "new-user-location", "data": {"userName": myUserName, "searchRadius": parseInt(searchRadius), "lat": lat, "lng": lng}};
 	socket.send(JSON.stringify(newPosition));
 	
 	// Create radius indicator
@@ -148,7 +174,7 @@ function positionSuccess(position) {
 		fillOpacity: 0.11,
 		map: map,
 		center: new google.maps.LatLng(lat,lng),
-		radius: searchRadius
+		radius: parseInt(searchRadius)
 	});
 	//console.log("Report emmited");
 }
@@ -203,20 +229,38 @@ function createMarker(userName, lat, lng, showInfowindow){
 	});
 	
 	google.maps.event.addListener(marker, 'dragend', function() {
-		var distanceToUser;
-		var updatedArray = {};
-		
-		for (var key in busMarkers) {
-			distanceToUser = google.maps.geometry.spherical.computeDistanceBetween(busMarkers[key].getPosition(), this.getPosition());
-			if (distanceToUser < searchRadius){
-				updatedArray[key] = busMarkers[key];
-			} else {
-				removeBusMarker(key);
-			}
-		}
-		
-		busMarkers = updatedArray;
+		busMarkers = deleteOutOfBoundsMarkers(busMarkers, this.getPosition(), searchRadius);
 	});
+}
+
+// Check if marker is within the bounds of search radius
+function isWithinBounds(queryPoint, referencePoint, radius){
+	var withinBounds = false;
+	var distanceToUser = google.maps.geometry.spherical.computeDistanceBetween(queryPoint, referencePoint);
+	if (distanceToUser <= radius){
+		withinBounds = true;
+	}
+	
+	return withinBounds;
+}
+
+// Delete out of bounds bus markers
+function deleteOutOfBoundsMarkers(inputMarkers, referencePoint, searchRadius){
+	var outputMarkers = {};
+	for (var key in inputMarkers){
+		if (!! inputMarkers[key]){
+			if (isWithinBounds(inputMarkers[key].getPosition(), referencePoint, searchRadius)){
+				outputMarkers[key] = inputMarkers[key];
+			} else {
+				inputMarkers[key].setMap(null);
+				delete inputMarkers[key];
+			}
+		} else {
+			inputMarkers.splice(key,1);
+		}
+	}
+	
+	return outputMarkers;
 }
 
 // handle geolocation api errors
@@ -260,8 +304,12 @@ function stopSimulation(){
 
 function removeBusMarker(id){
 	// Remove from map and delete
-	busMarkers[id].setMap(null);
-	busMarkers[id] = null;
+	if (!! busMarkers[id]){
+		busMarkers[id].setMap(null);
+		busMarkers[id] = null;
+	}
+	
+	delete busMarkers[id];
 }
 
 
