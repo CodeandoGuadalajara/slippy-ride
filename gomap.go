@@ -44,9 +44,13 @@ var (
 	usersTableConnectionId    string = "id_connection"
 	usersTableName            string = "name"
 	usersTableStatus          string = "status"
+	usersTableSearchRadius	  string = "search_radius"
 	usersTableGeographyColumn string = "geography"
+	
+	// User options
+	searchRadiusOptions = [4]int{0,1000,2000,3000}
+	searchRadiusBuffer	int = 500
 )
-
 // A hub represents the structure of a websockets connection hub.
 // It contains a connections map and channels for broadcasting messages,
 // registering and unregistering connections.
@@ -142,39 +146,50 @@ func (h *hub) runHub() {
 					panic(err)
 				}
 
-				// new-bus-location requires selective broadcast
+				// updated-bus-location requires selective broadcast
 				if jsonData["event"] == "updated-bus-location" {
 
 					// Get message data
 					data := jsonData["data"].(map[string]interface{})
 
-					// Query users to broadcast to based on location
-					query := fmt.Sprint("SELECT ", usersTableConnectionId, " FROM ", usersTable, " WHERE ST_DWITHIN(", usersTableGeographyColumn, ", ST_GeomFromText('POINT(", data["lng"], " ", data["lat"], ")',4326), 1000);")
-					rows, err := dbConn.Query(query)
+					// With each of the search radius defined in the default variables...
+					for _, searchRadius := range searchRadiusOptions {
+						
+						// Query users to broadcast to based on location and search radius
+						var query string
+						// A search radius of 0 means no limit so we omit the radius limit clause
+						if searchRadius == 0 {
+							query = fmt.Sprint("SELECT ", usersTableConnectionId, " FROM ", usersTable, " WHERE ", usersTableSearchRadius, "=", searchRadius, ";")
+						} else {
+							query = fmt.Sprint("SELECT ", usersTableConnectionId, " FROM ", usersTable, " WHERE ", usersTableSearchRadius, "=", searchRadius, " AND ST_DWITHIN(", usersTableGeographyColumn, ", ST_GeomFromText('POINT(", data["lng"], " ", data["lat"], ")',4326), ", searchRadius + searchRadiusBuffer, ");")
+						}
+						
+						rows, err := dbConn.Query(query)
 
-					if err != nil {
-						fmt.Println(err)
-						log.Fatal(err)
-					}
-
-					// Broadcast to each of the resulting users
-					for rows.Next() {
-						var id_connection string
-						if err := rows.Scan(&id_connection); err != nil {
+						if err != nil {
 							fmt.Println(err)
 							log.Fatal(err)
 						}
-						if c, ok := h.connections[id_connection]; ok {
-							c.send <- m
-						} else {
-							delete(h.connections, id_connection)
-							close(c.send)
+	
+						// Broadcast to each of the resulting users
+						for rows.Next() {
+							var id_connection string
+							if err := rows.Scan(&id_connection); err != nil {
+								fmt.Println(err)
+								log.Fatal(err)
+							}
+							if c, ok := h.connections[id_connection]; ok {
+								c.send <- m
+							} else {
+								delete(h.connections, id_connection)
+								close(c.send)
+							}
 						}
-					}
-
-					// Log errors
-					if err := rows.Err(); err != nil {
-						log.Fatal(err)
+	
+						// Log errors
+						if err := rows.Err(); err != nil {
+							log.Fatal(err)
+						}
 					}
 
 				} else {
@@ -241,7 +256,7 @@ func getEventResponse(jsonMessage []byte, connectionID string) []byte {
 		// Define query and execute as goroutine
 		data := jsonData["data"].(map[string]interface{})
 
-		query := fmt.Sprint("INSERT INTO ", usersTable, " (", usersTableName, ",", usersTableStatus, ",", usersTableConnectionId, ",", usersTableGeographyColumn, ") VALUES ('", data["userName"], "', 1, '", connectionID, "', ST_GeomFromText('POINT(", data["lng"], " ", data["lat"], ")',4326));")
+		query := fmt.Sprint("INSERT INTO ", usersTable, " (", usersTableName, ",", usersTableStatus, ",", usersTableConnectionId, ",", usersTableSearchRadius, ",", usersTableGeographyColumn, ") VALUES ('", data["userName"], "', 1, '", connectionID, "',", data["searchRadius"], ", ST_GeomFromText('POINT(", data["lng"], " ", data["lat"], ")',4326));")
 		go executeQuery(dbConn, query)
 
 		eventResponse = jsonMessage
@@ -256,6 +271,19 @@ func getEventResponse(jsonMessage []byte, connectionID string) []byte {
 		data := jsonData["data"].(map[string]interface{})
 
 		query := fmt.Sprint("UPDATE ", usersTable, " SET ", usersTableName, " = '", data["userName"], "', ", usersTableStatus, "=1, ", usersTableGeographyColumn, " = ST_GeomFromText('POINT(", data["lng"], " ", data["lat"], ")',4326) WHERE ", usersTableConnectionId, " = '", connectionID, "';")
+		go executeQuery(dbConn, query)
+		eventResponse = jsonMessage
+		err = nil
+
+		break
+	
+	// User changed search radius
+	case "updated-user-search-radius":
+
+		// Define query and execute as goroutine
+		data := jsonData["data"].(map[string]interface{})
+
+		query := fmt.Sprint("UPDATE ", usersTable, " SET ", usersTableSearchRadius, " = ", data["searchRadius"], " WHERE ", usersTableConnectionId, " = '", connectionID, "';")
 		go executeQuery(dbConn, query)
 		eventResponse = jsonMessage
 		err = nil
