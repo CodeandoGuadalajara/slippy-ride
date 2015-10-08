@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 	<head>
-		<title>Simple Map</title>
+		<title>Slippy Ride GDL</title>
 		<meta name="viewport" content="initial-scale=1.0, user-scalable=no">
 		<meta charset="utf-8">
 		<style>
@@ -16,6 +16,10 @@
 		<script type="text/javascript" src="/static/js/location-reporter.js"></script>
 		
 		<script type="text/javascript">
+			
+			/**
+			 * Initializes the user's map, socket and control events
+			 */
 			function initialize() {
 				map = new google.maps.Map(document.getElementById('map-canvas'), {
 					zoom: 13,
@@ -24,12 +28,14 @@
 				
 				initializeSocket();
 				
+				// Report user's location as stated by the browser
 				reportLocationButton.onclick = function(){
 					myUserName = nameField.value;
 					searchRadius = searchRadiusField.options[searchRadiusField.selectedIndex].value;
 					var userLocation = getBrowserGeolocation();
 				};
 				
+				// When the radius field is changed, update the map and query variables
 				searchRadiusField.onchange = function(){
 					if (!! radiusMarker){
 						// Update drawing
@@ -45,6 +51,7 @@
 					}
 				}
 			}
+			
 			google.maps.event.addDomListener(window, 'load', initialize);
 	
 	   </script>
