@@ -261,13 +261,17 @@ function createUserMarker(userName, lat, lng, showInfowindow){
 	
 	// On drag broadcast new position and update radius marker
 	google.maps.event.addListener(marker, 'drag', function() {
-		var newPosition = {"event": "updated-user-location", "data": {"userName": myUserName, "lat": this.getPosition().lat(), "lng": this.getPosition().lng()}};
+		var newPosition = {"event": "updating-user-location", "data": {"userName": myUserName, "lat": this.getPosition().lat(), "lng": this.getPosition().lng()}};
 		socket.send(JSON.stringify(newPosition));
 		
 		radiusMarker.setCenter(this.getPosition());
+		
+		busMarkers = deleteOutOfBoundsMarkers(busMarkers, this.getPosition(), searchRadius);
 	});
 	
 	google.maps.event.addListener(marker, 'dragend', function() {
+		var newPosition = {"event": "updated-user-location", "data": {"userName": myUserName, "lat": this.getPosition().lat(), "lng": this.getPosition().lng()}};
+		socket.send(JSON.stringify(newPosition));
 		busMarkers = deleteOutOfBoundsMarkers(busMarkers, this.getPosition(), searchRadius);
 	});
 }
@@ -404,13 +408,12 @@ window.onbeforeunload = cleanupAndExit;
  * stop the simulation. Finally the web socket used for communications will be closed.
  */
 function cleanupAndExit(){
-	
 	// If user is reporting location stop
 	if (myUserName != null){
 		var userDeletion = {"event": "user-left", "data": { "userName": myUserName}};
 		socket.send(JSON.stringify(userDeletion));
-	} 
-	
+	}
+
 	// Check if is simulator then delete buses
 	if (isSimulator){
 		stopSimulation();
@@ -425,7 +428,7 @@ function cleanupAndExit(){
  */
 function stopSimulation(){
 	for (var key in busMarkers) {
-       if (busMarkers.hasOwnProperty(key)) {
+		if (busMarkers.hasOwnProperty(key)) {
         	// Emit removal event
         	var simulationStopper = {"event": "remove-bus-marker", "data": {"id": key}};
 			socket.send(JSON.stringify(simulationStopper));

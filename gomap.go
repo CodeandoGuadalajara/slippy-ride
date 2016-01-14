@@ -8,13 +8,15 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/gorilla/websocket"
-	_ "github.com/lib/pq"
-	"github.com/satori/go.uuid"
 	"html/template"
 	"log"
 	"net/http"
 	"path/filepath"
+
+	"github.com/garyburd/redigo/redis"
+	"github.com/gorilla/websocket"
+	_ "github.com/lib/pq"
+	"github.com/satori/go.uuid"
 )
 
 // Initial variables.
@@ -23,19 +25,24 @@ var (
 	addr        = flag.String("addr", ":8080", "http service address")
 	homeTempl   *template.Template
 	routesTempl *template.Template
-	
+
 	// Paths
-	basePath 		string = "."
-	templatesPath	string = filepath.Join(basePath, "templates")
-	httpStaticPath	string = filepath.Join(basePath, "static")
+	basePath       string = "."
+	templatesPath  string = filepath.Join(basePath, "templates")
+	httpStaticPath string = filepath.Join(basePath, "static")
 
 	// DB connection parameters
 	dbConn     *sql.DB
 	dbHost     string = "localhost"
-	dbName     string = "Gaia"
+	dbName     string = "gaia"
 	dbUser     string = "webapp"
 	dbPassword string = "PG4pp!"
 	dbSslMode  string = "disable"
+
+	// Redis connection parameters
+	redisConn    redis.Conn
+	redisNetwork string = "tcp"
+	redisAddress string = ":6379"
 
 	// Users table column names
 	// No variable is defined for SRID since we are using a geography column type and
@@ -44,13 +51,14 @@ var (
 	usersTableConnectionId    string = "id_connection"
 	usersTableName            string = "name"
 	usersTableStatus          string = "status"
-	usersTableSearchRadius	  string = "search_radius"
+	usersTableSearchRadius    string = "search_radius"
 	usersTableGeographyColumn string = "geography"
-	
+
 	// User options
-	searchRadiusOptions = [4]int{0,1000,2000,3000}
-	searchRadiusBuffer	int = 500
+	searchRadiusOptions     = [4]int{0, 1000, 2000, 3000}
+	searchRadiusBuffer  int = 500
 )
+
 // A hub represents the structure of a websockets connection hub.
 // It contains a connections map and channels for broadcasting messages,
 // registering and unregistering connections.
@@ -90,6 +98,13 @@ type wsHandler struct {
 	h *hub
 }
 
+type mapUser struct {
+	mapUserName         string `user:"name"`
+	mapUserStatus       string `user:"status"`
+	mapUserSearchRadius string `user:"search_radius"`
+	//MapUserLocation		string 'user:"user_location"'
+}
+
 // dbConnect creates the connection to the database using the parameters specified in the Initial variables.
 func dbConnect() *sql.DB {
 	// Create connection
@@ -100,6 +115,20 @@ func dbConnect() *sql.DB {
 	return db
 }
 
+// redisConnect creates the connection to the Redis data store using the parameters specified in the Initial variables
+func redisConnect() redis.Conn {
+	// Create connection
+	c, err := redis.Dial(redisNetwork, redisAddress)
+
+	if err != nil {
+		fmt.Println("Conn Error")
+		panic(err)
+	}
+
+	return c
+
+}
+
 // executeQuery runs the database query string passed to it.
 func executeQuery(dbConn *sql.DB, query string) {
 
@@ -107,6 +136,48 @@ func executeQuery(dbConn *sql.DB, query string) {
 
 	if err != nil {
 		fmt.Println(err)
+	}
+}
+
+// redisGeoAdd Adds a geospatial item to redis.
+func redisGeoAdd(key string, lat float64, lng float64, id string) {
+
+	if _, err := redisConn.Do("GEOADD", key,
+		lng, lat, id); err != nil {
+		fmt.Println("GEOADD Error.")
+		log.Fatal(err)
+	}
+}
+
+// redisGeoUpdate updates an existing geospatial item by deleting it and re-creating it.
+func redisGeoUpdate(key string, lat float64, lng float64, id string) {
+
+	if _, err := redisConn.Do("ZREM", key,
+		id); err != nil {
+		fmt.Println("GeoUpdate ZREM Error.")
+		log.Fatal(err)
+	}
+
+	if _, err := redisConn.Do("GEOADD", key,
+		lng, lat, id); err != nil {
+		fmt.Println("GeoUpdate GEOADD Error.")
+		log.Fatal(err)
+	}
+}
+
+// redisUserDelete deletes a user from the data store removing both it's data and geoposition
+func redisUserDelete(key string, id string) {
+
+	if _, err := redisConn.Do("ZREM", key,
+		id); err != nil {
+		fmt.Println("UserDelete ZREM Error.")
+		log.Fatal(err)
+	}
+
+	if _, err := redisConn.Do("HDEL", key,
+		id); err != nil {
+		fmt.Println("UserDelete HDEL Error.")
+		log.Fatal(err)
 	}
 }
 
@@ -154,41 +225,45 @@ func (h *hub) runHub() {
 
 					// With each of the search radius defined in the default variables...
 					for _, searchRadius := range searchRadiusOptions {
-						
+
+						var values []interface{}
+						var err error
 						// Query users to broadcast to based on location and search radius
-						var query string
 						// A search radius of 0 means no limit so we omit the radius limit clause
 						if searchRadius == 0 {
-							query = fmt.Sprint("SELECT ", usersTableConnectionId, " FROM ", usersTable, " WHERE ", usersTableSearchRadius, "=", searchRadius, ";")
-						} else {
-							query = fmt.Sprint("SELECT ", usersTableConnectionId, " FROM ", usersTable, " WHERE ", usersTableSearchRadius, "=", searchRadius, " AND ST_DWITHIN(", usersTableGeographyColumn, ", ST_GeomFromText('POINT(", data["lng"], " ", data["lat"], ")',4326), ", searchRadius + searchRadiusBuffer, ");")
-						}
-						
-						rows, err := dbConn.Query(query)
 
-						if err != nil {
-							fmt.Println(err)
-							log.Fatal(err)
-						}
-	
-						// Broadcast to each of the resulting users
-						for rows.Next() {
-							var id_connection string
-							if err := rows.Scan(&id_connection); err != nil {
-								fmt.Println(err)
+							values, err = redis.Values(redisConn.Do("ZRANGE", "users-location", 0, -1))
+							if err != nil {
 								log.Fatal(err)
 							}
-							if c, ok := h.connections[id_connection]; ok {
-								c.send <- m
-							} else {
-								delete(h.connections, id_connection)
-								close(c.send)
+
+						} else {
+
+							values, err = redis.Values(redisConn.Do("GEORADIUS", "users-location", data["lng"], data["lat"], searchRadius, "m"))
+							if err != nil {
+								log.Fatal(err)
 							}
 						}
-	
-						// Log errors
-						if err := rows.Err(); err != nil {
-							log.Fatal(err)
+
+						// If there are users nearby
+						if len(values) > 0 {
+
+							var connIDs []string
+							if err := redis.ScanSlice(values, &connIDs); err != nil {
+								// handle error
+								log.Fatal(err)
+							}
+
+							// Broadcast to each of the resulting users
+							for _, id_connection := range connIDs {
+
+								if c, ok := h.connections[id_connection]; ok {
+									c.send <- m
+								} else {
+									delete(h.connections, id_connection)
+									close(c.send)
+								}
+							}
 						}
 					}
 
@@ -256,11 +331,31 @@ func getEventResponse(jsonMessage []byte, connectionID string) []byte {
 		// Define query and execute as goroutine
 		data := jsonData["data"].(map[string]interface{})
 
-		query := fmt.Sprint("INSERT INTO ", usersTable, " (", usersTableName, ",", usersTableStatus, ",", usersTableConnectionId, ",", usersTableSearchRadius, ",", usersTableGeographyColumn, ") VALUES ('", data["userName"], "', 1, '", connectionID, "',", data["searchRadius"], ", ST_GeomFromText('POINT(", data["lng"], " ", data["lat"], ")',4326));")
-		go executeQuery(dbConn, query)
+		// Store user data
+		if _, err := redisConn.Do("HMSET", connectionID,
+			"name", data["userName"],
+			"status", 1,
+			"search_radius", data["searchRadius"]); err != nil {
+			fmt.Println("HMSET Error")
+			log.Fatal(err)
+		}
+
+		// Store user position
+		go redisGeoAdd("users-location", data["lat"].(float64), data["lng"].(float64), connectionID)
 
 		eventResponse = jsonMessage
 		err = nil
+
+		break
+
+	// User is changing position, update views
+	case "updating-user-location":
+
+		// Remarshall event to update in clients
+		jsonData["event"] = "updated-user-location"
+
+		// Marshall JSON
+		eventResponse, err = json.Marshal(jsonData)
 
 		break
 
@@ -270,21 +365,29 @@ func getEventResponse(jsonMessage []byte, connectionID string) []byte {
 		// Define query and execute as goroutine
 		data := jsonData["data"].(map[string]interface{})
 
-		query := fmt.Sprint("UPDATE ", usersTable, " SET ", usersTableName, " = '", data["userName"], "', ", usersTableStatus, "=1, ", usersTableGeographyColumn, " = ST_GeomFromText('POINT(", data["lng"], " ", data["lat"], ")',4326) WHERE ", usersTableConnectionId, " = '", connectionID, "';")
-		go executeQuery(dbConn, query)
+		// Update user position
+		redisGeoUpdate("users-location", data["lat"].(float64), data["lng"].(float64), connectionID)
+
 		eventResponse = jsonMessage
 		err = nil
 
 		break
-	
+
 	// User changed search radius
 	case "updated-user-search-radius":
 
 		// Define query and execute as goroutine
 		data := jsonData["data"].(map[string]interface{})
 
-		query := fmt.Sprint("UPDATE ", usersTable, " SET ", usersTableSearchRadius, " = ", data["searchRadius"], " WHERE ", usersTableConnectionId, " = '", connectionID, "';")
-		go executeQuery(dbConn, query)
+		// Update user data
+		if _, err := redisConn.Do("HMSET", connectionID,
+			"name", data["userName"],
+			"status", 1,
+			"search_radius", data["searchRadius"]); err != nil {
+			fmt.Println("HMSET Error")
+			log.Fatal(err)
+		}
+
 		eventResponse = jsonMessage
 		err = nil
 
@@ -296,8 +399,8 @@ func getEventResponse(jsonMessage []byte, connectionID string) []byte {
 		// Send cleanup marker event
 		jsonData["event"] = "remove-user-marker"
 
-		query := fmt.Sprint("DELETE FROM ", usersTable, " WHERE ", usersTableConnectionId, "= '", connectionID, "';")
-		go executeQuery(dbConn, query)
+		// Delete user
+		go redisUserDelete("users-location", connectionID)
 
 		// Marshall JSON
 		eventResponse, err = json.Marshal(jsonData)
@@ -356,9 +459,14 @@ func routeSimulatorHandler(c http.ResponseWriter, req *http.Request) {
 // Main entry point
 func main() {
 
-	// Connect to DB
-	dbConn = dbConnect()
-	defer dbConn.Close()
+	/*
+		// Connect to DB
+		dbConn = dbConnect()
+		defer dbConn.Close()
+	*/
+	// Connect to Redis
+	redisConn = redisConnect()
+	defer redisConn.Close()
 
 	// Parse initial flags
 	flag.Parse()
